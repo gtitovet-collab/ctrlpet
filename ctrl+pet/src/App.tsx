@@ -10,7 +10,6 @@ import ClinicalHistoryModule from './components/ClinicalHistoryModule';
 import ReproductiveModule from './components/ReproductiveModule';
 import RoutineModule from './components/RoutineModule';
 import ShareExportModule from './components/ShareExportModule';
-import TechnicalSpecs from './components/TechnicalSpecs';
 import NearbyFinder from './components/NearbyFinder';
 import { Map as MapIcon } from 'lucide-react';
 
@@ -49,7 +48,10 @@ import {
   Clock,
   Menu,
   X,
-  Cloud
+  Cloud,
+  Copy,
+  Check,
+  Mail
 } from 'lucide-react';
 
 // Generates initial seed data so the client sees a rich, functional dashboard on first access (Descobribilidade Instantânea)
@@ -267,6 +269,44 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<'synced' | 'syncing'>('synced');
   const [coOwnerEmail, setCoOwnerEmail] = useState('');
   const [linkedUsers, setLinkedUsers] = useState<string[]>([]);
+  const [coOwners, setCoOwners] = useState<string[]>([]);
+  const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
+  const [lastInvitedEmail, setLastInvitedEmail] = useState('');
+  const [generatedInviteLink, setGeneratedInviteLink] = useState('');
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [isGuardaTableMissing, setIsGuardaTableMissing] = useState(false);
+
+  // Fetch real co-owners from Supabase when selected pet changes
+  const fetchCoOwners = async (petId: string) => {
+    if (!supabase || !petId) return;
+    try {
+      const { data, error } = await supabase
+        .from('GuardaCompartilhada')
+        .select('co_owner_email')
+        .eq('pet_id', petId);
+      if (error) {
+        if (error.code === '42P01' || error.message?.includes('GuardaCompartilhada') || error.message?.includes('schema cache')) {
+          setIsGuardaTableMissing(true);
+          console.warn('Aviso: Tabela GuardaCompartilhada ainda não existe no Supabase.');
+        } else {
+          console.error('Erro ao buscar co-proprietários no Supabase:', error.message);
+        }
+      } else if (data) {
+        setCoOwners(data.map((item: any) => item.co_owner_email));
+        setIsGuardaTableMissing(false);
+      }
+    } catch (err) {
+      console.error('Erro ao buscar co-proprietários no Supabase:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedPetId) {
+      fetchCoOwners(selectedPetId);
+    } else {
+      setCoOwners([]);
+    }
+  }, [selectedPetId]);
 
   // Synchronize linkedUsers with the current logged-in user
   useEffect(() => {
@@ -660,22 +700,54 @@ export default function App() {
     }
   };
 
-  const fetchPetsFromSupabase = async () => {
+  const fetchPetsFromSupabase = async (activeSession?: typeof session): Promise<Pet[]> => {
     try {
       if (!supabase) {
-        return;
+        return [];
       }
       setSyncStatus('syncing');
-      const userId = session?.id || session?.email || 'unknown';
-      const { data, error } = await supabase
-        .from('Pets')
-        .select('*')
-        .eq('user_id', userId);
+      const sess = activeSession ?? session;
+      const userId = sess?.id || sess?.email || 'unknown';
+      const email = sess?.email?.toLowerCase().trim();
+
+      // 1. Tentar carregar os IDs de pets compartilhados na guarda compartilhada de forma defensiva
+      let sharedPetIds: string[] = [];
+      if (email) {
+        try {
+          const { data: sharedData, error: sharedError } = await supabase
+            .from('GuardaCompartilhada')
+            .select('pet_id')
+            .eq('co_owner_email', email);
+          if (sharedError) {
+            console.warn('Erro ao consultar GuardaCompartilhada:', sharedError.message);
+            if (sharedError.code === '42P01' || sharedError.message?.includes('GuardaCompartilhada') || sharedError.message?.includes('schema cache')) {
+              setIsGuardaTableMissing(true);
+            }
+          } else if (sharedData) {
+            sharedPetIds = sharedData.map((s: any) => s.pet_id);
+            setIsGuardaTableMissing(false);
+          }
+        } catch (sharedErr) {
+          console.warn('Tabela GuardaCompartilhada ainda não configurada no Supabase. Fallback local ativo.', sharedErr);
+        }
+      }
+
+      // 2. Fazer query filtrando pelos pets de posse direta OU pets compartilhados via Guarda
+      let query = supabase.from('Pets').select('*');
+      if (sharedPetIds.length > 0) {
+        const escapedIds = sharedPetIds.map(id => `"${id}"`).join(',');
+        query = query.or(`user_id.eq."${userId}",id.in.(${escapedIds})`);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error('Erro ao buscar pets do Supabase:', error.message);
-      } else if (data && data.length > 0) {
-        const mappedPets: Pet[] = data.map((item: any) => {
+        return [];
+      } else {
+        const mappedPets: Pet[] = (data || []).map((item: any) => {
           const rawSpecies = (item['Espécie'] || item.species || '').toLowerCase();
           const mappedSpecies: 'dog' | 'cat' | 'other' = 
             rawSpecies.includes('gato') || rawSpecies.includes('cat') 
@@ -700,40 +772,47 @@ export default function App() {
 
         setPets(mappedPets);
         localStorage.setItem('ctrlpet_pets', JSON.stringify(mappedPets));
-        setToastNotification('Pets carregados da nuvem!');
+        if (mappedPets.length > 0) {
+          setToastNotification('Pets carregados da nuvem!');
+        }
+        return mappedPets;
       }
     } catch (err) {
       console.error('Erro ao conectar ao Supabase para buscar pets:', err);
+      return [];
     } finally {
       setSyncStatus('synced');
     }
   };
 
-  const fetchVaccinesFromSupabase = async () => {
+  const fetchVaccinesFromSupabase = async (activeSession?: typeof session, currentPets?: Pet[]) => {
     try {
       if (!supabase) {
         return;
       }
       setSyncStatus('syncing');
-      const userId = session?.id || session?.email || 'unknown';
-      const { data, error } = await supabase
-        .from('Vacinas')
-        .select('*')
-        .eq('user_id', userId);
+      const sess = activeSession ?? session;
+      const userId = sess?.id || sess?.email || 'unknown';
+
+      const petsList = currentPets ?? pets;
+      const petIds = petsList.map(p => p.id);
+
+      let query = supabase.from('Vacinas').select('*');
+      if (petIds.length > 0) {
+        query = query.in('pet_id', petIds);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error('Erro ao buscar vacinas do Supabase:', error.message);
-      } else if (data && data.length > 0) {
-        const mappedVaccines: Vaccine[] = data.map((item: any) => {
-          let petId = item.pet_id ? item.pet_id.toString() : selectedPetId;
-          const foundPet = pets.find(p => p.id === item.pet_id);
-          if (foundPet) {
-            petId = foundPet.id;
-          }
-
+      } else {
+        const mappedVaccines: Vaccine[] = (data || []).map((item: any) => {
           return {
             id: item.id ? item.id.toString() : `vac-sync-${Date.now()}-${Math.random()}`,
-            petId: petId,
+            petId: item.pet_id ? item.pet_id.toString() : selectedPetId,
             name: item.Nome || item.name || 'Sem nome',
             appliedDate: item['Aplicação'] || item.appliedDate || null,
             boosterDate: item['Próxima dose'] || item.boosterDate || '',
@@ -744,19 +823,8 @@ export default function App() {
           } as Vaccine;
         });
 
-        const merged = [...vaccines];
-        mappedVaccines.forEach((mv) => {
-          const index = merged.findIndex((v) => v.id === mv.id);
-          if (index !== -1) {
-            merged[index] = mv;
-          } else {
-            merged.push(mv);
-          }
-        });
-
-        setVaccines(merged);
-        localStorage.setItem('ctrlpet_vac', JSON.stringify(merged));
-        setToastNotification('Vacinas carregadas da nuvem!');
+        setVaccines(mappedVaccines);
+        localStorage.setItem('ctrlpet_vac', JSON.stringify(mappedVaccines));
       }
     } catch (err) {
       console.error('Erro ao conectar ao Supabase para buscar vacinas:', err);
@@ -765,20 +833,29 @@ export default function App() {
     }
   };
 
-  const fetchMeasurementsFromSupabase = async () => {
+  const fetchMeasurementsFromSupabase = async (activeSession?: typeof session, currentPets?: Pet[]) => {
     try {
       if (!supabase) return;
       setSyncStatus('syncing');
-      const userId = session?.id || session?.email || 'unknown';
-      const { data, error } = await supabase
-        .from('Medidas')
-        .select('*')
-        .eq('user_id', userId);
+      const sess = activeSession ?? session;
+      const userId = sess?.id || sess?.email || 'unknown';
+
+      const petsList = currentPets ?? pets;
+      const petIds = petsList.map(p => p.id);
+
+      let query = supabase.from('Medidas').select('*');
+      if (petIds.length > 0) {
+        query = query.in('pet_id', petIds);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error('Erro ao buscar medidas do Supabase:', error.message);
-      } else if (data && data.length > 0) {
-        const mapped: Measurement[] = data.map((item: any) => ({
+      } else {
+        const mapped: Measurement[] = (data || []).map((item: any) => ({
           id: item.id,
           petId: item.pet_id,
           date: item.Data || item.date,
@@ -797,20 +874,29 @@ export default function App() {
     }
   };
 
-  const fetchMedicationsFromSupabase = async () => {
+  const fetchMedicationsFromSupabase = async (activeSession?: typeof session, currentPets?: Pet[]) => {
     try {
       if (!supabase) return;
       setSyncStatus('syncing');
-      const userId = session?.id || session?.email || 'unknown';
-      const { data, error } = await supabase
-        .from('Medicamentos')
-        .select('*')
-        .eq('user_id', userId);
+      const sess = activeSession ?? session;
+      const userId = sess?.id || sess?.email || 'unknown';
+
+      const petsList = currentPets ?? pets;
+      const petIds = petsList.map(p => p.id);
+
+      let query = supabase.from('Medicamentos').select('*');
+      if (petIds.length > 0) {
+        query = query.in('pet_id', petIds);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error('Erro ao buscar medicamentos do Supabase:', error.message);
-      } else if (data && data.length > 0) {
-        const mapped: MedicationSchedule[] = data.map((item: any) => ({
+      } else {
+        const mapped: MedicationSchedule[] = (data || []).map((item: any) => ({
           id: item.id,
           petId: item.pet_id,
           name: item.Nome || item.name,
@@ -832,20 +918,29 @@ export default function App() {
     }
   };
 
-  const fetchClinicalLogsFromSupabase = async () => {
+  const fetchClinicalLogsFromSupabase = async (activeSession?: typeof session, currentPets?: Pet[]) => {
     try {
       if (!supabase) return;
       setSyncStatus('syncing');
-      const userId = session?.id || session?.email || 'unknown';
-      const { data, error } = await supabase
-        .from('HistoricoClinico')
-        .select('*')
-        .eq('user_id', userId);
+      const sess = activeSession ?? session;
+      const userId = sess?.id || sess?.email || 'unknown';
+
+      const petsList = currentPets ?? pets;
+      const petIds = petsList.map(p => p.id);
+
+      let query = supabase.from('HistoricoClinico').select('*');
+      if (petIds.length > 0) {
+        query = query.in('pet_id', petIds);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error('Erro ao buscar histórico clínico do Supabase:', error.message);
-      } else if (data && data.length > 0) {
-        const mapped: ClinicalLog[] = data.map((item: any) => ({
+      } else {
+        const mapped: ClinicalLog[] = (data || []).map((item: any) => ({
           id: item.id,
           petId: item.pet_id,
           type: item.Tipo || item.type,
@@ -865,20 +960,29 @@ export default function App() {
     }
   };
 
-  const fetchReproCyclesFromSupabase = async () => {
+  const fetchReproCyclesFromSupabase = async (activeSession?: typeof session, currentPets?: Pet[]) => {
     try {
       if (!supabase) return;
       setSyncStatus('syncing');
-      const userId = session?.id || session?.email || 'unknown';
-      const { data, error } = await supabase
-        .from('CiclosReprodutivos')
-        .select('*')
-        .eq('user_id', userId);
+      const sess = activeSession ?? session;
+      const userId = sess?.id || sess?.email || 'unknown';
+
+      const petsList = currentPets ?? pets;
+      const petIds = petsList.map(p => p.id);
+
+      let query = supabase.from('CiclosReprodutivos').select('*');
+      if (petIds.length > 0) {
+        query = query.in('pet_id', petIds);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error('Erro ao buscar ciclos reprodutivos do Supabase:', error.message);
-      } else if (data && data.length > 0) {
-        const mapped: ReproCycle[] = data.map((item: any) => ({
+      } else {
+        const mapped: ReproCycle[] = (data || []).map((item: any) => ({
           id: item.id,
           petId: item.pet_id,
           date: item.Data || item.date,
@@ -896,20 +1000,29 @@ export default function App() {
     }
   };
 
-  const fetchRoutinesFromSupabase = async () => {
+  const fetchRoutinesFromSupabase = async (activeSession?: typeof session, currentPets?: Pet[]) => {
     try {
       if (!supabase) return;
       setSyncStatus('syncing');
-      const userId = session?.id || session?.email || 'unknown';
-      const { data, error } = await supabase
-        .from('Rotinas')
-        .select('*')
-        .eq('user_id', userId);
+      const sess = activeSession ?? session;
+      const userId = sess?.id || sess?.email || 'unknown';
+
+      const petsList = currentPets ?? pets;
+      const petIds = petsList.map(p => p.id);
+
+      let query = supabase.from('Rotinas').select('*');
+      if (petIds.length > 0) {
+        query = query.in('pet_id', petIds);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error('Erro ao buscar rotinas do Supabase:', error.message);
-      } else if (data && data.length > 0) {
-        const mapped: RoutineActivity[] = data.map((item: any) => ({
+      } else {
+        const mapped: RoutineActivity[] = (data || []).map((item: any) => ({
           id: item.id,
           petId: item.pet_id,
           title: item['Título'] || item.title,
@@ -935,13 +1048,56 @@ export default function App() {
       console.log('Sem sessão ativa. Pulando carga do Supabase.');
       return;
     }
-    await fetchPetsFromSupabase();
-    await fetchVaccinesFromSupabase();
-    await fetchMeasurementsFromSupabase();
-    await fetchMedicationsFromSupabase();
-    await fetchClinicalLogsFromSupabase();
-    await fetchReproCyclesFromSupabase();
-    await fetchRoutinesFromSupabase();
+    const loadedPets = await fetchPetsFromSupabase(sess);
+    await fetchVaccinesFromSupabase(sess, loadedPets);
+    await fetchMeasurementsFromSupabase(sess, loadedPets);
+    await fetchMedicationsFromSupabase(sess, loadedPets);
+    await fetchClinicalLogsFromSupabase(sess, loadedPets);
+    await fetchReproCyclesFromSupabase(sess, loadedPets);
+    await fetchRoutinesFromSupabase(sess, loadedPets);
+  };
+
+  const checkAndApplyInvite = async (sess: typeof session) => {
+    if (!sess?.email || !supabase) {
+      await handleLoadFromSupabase(sess);
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const invitePetId = params.get('invite');
+    const invitePetName = params.get('petName') || 'Pet';
+    
+    if (invitePetId) {
+      try {
+        const email = sess.email.toLowerCase().trim();
+        const { error } = await supabase
+          .from('GuardaCompartilhada')
+          .upsert({
+            pet_id: invitePetId,
+            co_owner_email: email
+          });
+        
+        if (error) {
+          if (error.code === '42P01' || error.message?.includes('GuardaCompartilhada') || error.message?.includes('schema cache')) {
+            setIsGuardaTableMissing(true);
+            console.warn('Aviso: Tabela GuardaCompartilhada ausente no Supabase.');
+            setToastNotification(`Você aceitou o convite para compartilhar a guarda do(a) ${invitePetName}! Salvando localmente (Tabela Supabase pendente).`);
+            // Clean search params
+            window.history ? window.history.replaceState({}, document.title, window.location.pathname) : null;
+          } else {
+            console.error('Erro ao aceitar convite no Supabase:', error.message);
+          }
+        } else {
+          setToastNotification(`Você aceitou o convite para compartilhar a guarda do(a) ${invitePetName}!`);
+          setIsGuardaTableMissing(false);
+          // Clean search params
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+      } catch (err) {
+        console.error('Erro ao salvar vínculo de guarda compartilhada:', err);
+      }
+    }
+    // Always load the data after checking/applying
+    await handleLoadFromSupabase(sess);
   };
 
   // Load state on startup
@@ -1022,14 +1178,19 @@ export default function App() {
     }
 
     // Load data from Supabase only if user has an active session
-    // Pass parsedSession directly to avoid React setState race condition
-    handleLoadFromSupabase(parsedSession);
+    // Pass parsedSession directly to avoid React setState race condition and check incoming invitations
+    checkAndApplyInvite(parsedSession);
   }, []);
 
   // Update selected pet id automatically when pets populate
   useEffect(() => {
-    if (pets.length > 0 && !selectedPetId) {
-      setSelectedPetId(pets[0].id);
+    if (pets.length > 0) {
+      const exists = pets.some((p) => p.id === selectedPetId);
+      if (!exists) {
+        setSelectedPetId(pets[0].id);
+      }
+    } else {
+      setSelectedPetId('');
     }
   }, [pets, selectedPetId]);
 
@@ -1493,15 +1654,62 @@ export default function App() {
     setIsProfileModalOpen(false);
   };
 
-  // 8. Guarda Compartilhada simulation
-  const handleAddCoOwner = (e: React.FormEvent) => {
+  // 8. Guarda Compartilhada simulation & real Supabase integration
+  const handleAddCoOwner = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!coOwnerEmail || linkedUsers.includes(coOwnerEmail)) return;
-    const updated = [...linkedUsers, coOwnerEmail];
-    setLinkedUsers(updated);
-    if (session?.email) {
-      localStorage.setItem(`ctrlpet_linked_users_${session.email.toLowerCase()}`, JSON.stringify(updated));
+    const emailToInvite = coOwnerEmail.toLowerCase().trim();
+    if (!emailToInvite) return;
+
+    const currentPet = pets.find((p) => p.id === selectedPetId);
+    const petName = currentPet ? currentPet.name : 'seu Pet';
+
+    // Update local simulation list
+    if (!linkedUsers.includes(emailToInvite)) {
+      const updated = [...linkedUsers, emailToInvite];
+      setLinkedUsers(updated);
+      if (session?.email) {
+        localStorage.setItem(`ctrlpet_linked_users_${session.email.toLowerCase()}`, JSON.stringify(updated));
+      }
     }
+
+    // Save to real Supabase database if configured
+    if (supabase && selectedPetId) {
+      try {
+        setSyncStatus('syncing');
+        const { error } = await supabase
+          .from('GuardaCompartilhada')
+          .upsert({
+            pet_id: selectedPetId,
+            co_owner_email: emailToInvite
+          });
+
+        if (error) {
+          if (error.code === '42P01' || error.message?.includes('GuardaCompartilhada') || error.message?.includes('schema cache')) {
+            setIsGuardaTableMissing(true);
+            console.warn('Aviso: Tabela GuardaCompartilhada ausente no Supabase.');
+            setToastNotification('Vínculo local criado! Tabela do Supabase ausente (veja instruções no painel).');
+          } else {
+            console.error('Erro ao salvar vínculo no Supabase:', error.message);
+            setToastNotification('Vínculo local criado. Banco de dados offline ou tabela não configurada.');
+          }
+        } else {
+          setToastNotification('Vínculo registrado com sucesso na nuvem!');
+          setIsGuardaTableMissing(false);
+          // Refresh database co-owners list
+          fetchCoOwners(selectedPetId);
+        }
+      } catch (err) {
+        console.error('Erro ao conectar ao Supabase para salvar guarda:', err);
+      } finally {
+        setSyncStatus('synced');
+      }
+    }
+
+    // Generate beautiful invitation URL
+    const link = `${window.location.origin}${window.location.pathname}?invite=${selectedPetId || ''}&by=${encodeURIComponent(session?.email || '')}&petName=${encodeURIComponent(petName)}`;
+    setGeneratedInviteLink(link);
+    setLastInvitedEmail(emailToInvite);
+    setIsInviteModalOpen(true);
     setCoOwnerEmail('');
   };
 
@@ -1611,8 +1819,8 @@ export default function App() {
             localStorage.setItem('ctrlpet_repro', '[]');
             localStorage.setItem('ctrlpet_rout', '[]');
 
-            // Carrega os dados reais deste usuário a partir do Supabase (se houverem)
-            handleLoadFromSupabase(parsed);
+            // Carrega os dados reais deste usuário a partir do Supabase e processa convites pendentes
+            checkAndApplyInvite(parsed);
           }
         }}
       />
@@ -1830,6 +2038,24 @@ export default function App() {
                   if (supabase) {
                     supabase.auth.signOut().catch(err => console.error('Erro ao deslogar do Supabase:', err));
                   }
+                  
+                  // Limpar dados locais ao deslogar para evitar vazamento ou telas vazias
+                  setPets([]);
+                  setVaccines([]);
+                  setMeasurements([]);
+                  setMedications([]);
+                  setClinicalLogs([]);
+                  setReproductiveCycles([]);
+                  setRoutines([]);
+                  setSelectedPetId('');
+
+                  localStorage.removeItem('ctrlpet_pets');
+                  localStorage.removeItem('ctrlpet_vac');
+                  localStorage.removeItem('ctrlpet_meas');
+                  localStorage.removeItem('ctrlpet_meds');
+                  localStorage.removeItem('ctrlpet_logs');
+                  localStorage.removeItem('ctrlpet_repro');
+                  localStorage.removeItem('ctrlpet_rout');
                 }}
                 className="p-1 px-2 hover:bg-slate-800 text-rose-400 hover:text-rose-300 rounded border border-transparent text-xs transition-colors cursor-pointer flex items-center gap-1"
                 title="Desconectar"
@@ -2169,7 +2395,7 @@ export default function App() {
                 </button>
               </form>
               <div className="flex flex-wrap gap-1.5 pt-1">
-                {linkedUsers.map((user) => (
+                {Array.from(new Set([...coOwners, ...linkedUsers])).map((user) => (
                   <span key={user} className="text-[10px] bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-400 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-850">
                     {user} (Guarda ativa)
                   </span>
@@ -2184,7 +2410,7 @@ export default function App() {
                   <Cloud className="w-4 h-4 text-emerald-500" /> Backup e Sincronização na Nuvem
                 </span>
                 <p className="text-xs text-slate-500 dark:text-slate-400 leading-normal mt-2">
-                  Guarde com segurança todas as informações de vacinas, tratamentos e evolução de peso. Acesse de outros aparelhos ou recupere os dados caso precise trocar de telefone.
+                  Guarde com segurança todas as informações de vacinas, tratamentos e evolução de peso. Acesse de outros aparelhos de forma automática e integrada em tempo real.
                 </p>
                 <div className="mt-3 flex items-center gap-2">
                   <span className="text-[11px] text-slate-400 font-medium">Status do Backup:</span>
@@ -2199,50 +2425,6 @@ export default function App() {
                     </span>
                   )}
                 </div>
-              </div>
-              <div className="flex flex-wrap gap-2 mt-2">
-                <button
-                  onClick={handleLoadFromSupabase}
-                  disabled={!supabase}
-                  className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/30 dark:hover:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-900/40 font-bold text-xs rounded-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Restaurar Dados Nuvem
-                </button>
-                <button
-                  onClick={async () => {
-                    if (!pets.length && !vaccines.length && !measurements.length && !medications.length && !clinicalLogs.length && !reproductiveCycles.length && !routines.length) {
-                      setToastNotification('Nenhum dado para sincronizar.');
-                      return;
-                    }
-                    setToastNotification('Sincronizando dados dos pets...');
-                    for (const p of pets) {
-                      await syncPetToSupabase(p);
-                    }
-                    for (const v of vaccines) {
-                      await syncVacinaToSupabase(v);
-                    }
-                    for (const m of measurements) {
-                      await syncMeasurementToSupabase(m);
-                    }
-                    for (const med of medications) {
-                      await syncMedicationToSupabase(med);
-                    }
-                    for (const l of clinicalLogs) {
-                      await syncClinicalLogToSupabase(l);
-                    }
-                    for (const rc of reproductiveCycles) {
-                      await syncReproCycleToSupabase(rc);
-                    }
-                    for (const r of routines) {
-                      await syncRoutineToSupabase(r);
-                    }
-                    setToastNotification('Todos os dados locais foram salvos com sucesso na nuvem!');
-                  }}
-                  disabled={!supabase}
-                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Sincronizar Manualmente
-                </button>
               </div>
             </div>
 
@@ -2409,6 +2591,101 @@ export default function App() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* 🤝 Co-Owner Share Invitation Link Modal */}
+      {isInviteModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 dark:bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md p-6 shadow-xl space-y-4 animate-in fade-in duration-200">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <h3 className="text-lg font-extrabold text-[#2B2BC4] dark:text-[#7a75ff] font-sans flex items-center gap-1.5">
+                <span>🤝 Convite de Guarda Compartilhada</span>
+              </h3>
+              <button
+                onClick={() => {
+                  setIsInviteModalOpen(false);
+                  setCopiedLink(false);
+                }}
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm font-bold p-1 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                Você adicionou <strong className="text-slate-800 dark:text-slate-200">{lastInvitedEmail}</strong> como tutor co-proprietário.
+                Envie o convite abaixo para que ele possa acessar, visualizar e atualizar as informações do pet em tempo real!
+              </p>
+
+              {/* Link Display Box */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Link Único de Compartilhamento</label>
+                <div className="flex gap-2 bg-slate-50 dark:bg-slate-950 p-2 rounded-lg border border-slate-200 dark:border-slate-850">
+                  <input
+                    type="text"
+                    readOnly
+                    onFocus={(e) => e.target.select()}
+                    value={generatedInviteLink}
+                    className="flex-1 bg-transparent border-none text-xs text-slate-600 dark:text-slate-400 focus:outline-none overflow-x-auto select-all font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(generatedInviteLink);
+                      setCopiedLink(true);
+                      setTimeout(() => setCopiedLink(false), 2000);
+                    }}
+                    className="p-1.5 bg-[#2B2BC4] hover:bg-[#1E1EB0] text-white rounded-lg transition-colors cursor-pointer shrink-0"
+                    title="Copiar Link"
+                  >
+                    {copiedLink ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick Actions */}
+              <div className="space-y-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = `Olá! Convido você para compartilhar a guarda do(a) ${pets.find(p => p.id === selectedPetId)?.name || 'meu pet'} no Ctrl+Pet para acompanharmos vacinas e histórico clínico juntos. Faça seu login ou cadastro para acessar: ${generatedInviteLink}`;
+                    window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`, '_blank');
+                  }}
+                  className="w-full py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  Compartilhar via WhatsApp 💬
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const petName = pets.find(p => p.id === selectedPetId)?.name || 'Pet';
+                    const subject = `Convite de Guarda Compartilhada: ${petName}`;
+                    const body = `Olá! Convido você para compartilhar a guarda do(a) ${petName} no Ctrl+Pet para acompanharmos vacinas e histórico clínico juntos.\n\nAcesse o link abaixo para visualizar e editar os dados em tempo real:\n${generatedInviteLink}`;
+                    window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`, '_blank');
+                  }}
+                  className="w-full py-2 bg-slate-100 hover:bg-slate-250 dark:bg-slate-850 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Mail className="w-4 h-4" /> Compartilhar via E-mail
+                </button>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-3 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsInviteModalOpen(false);
+                  setCopiedLink(false);
+                }}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold text-xs rounded-lg transition-colors cursor-pointer"
+              >
+                Concluído
+              </button>
+            </div>
           </div>
         </div>
       )}

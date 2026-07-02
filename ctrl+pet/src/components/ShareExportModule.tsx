@@ -28,6 +28,8 @@ export default function ShareExportModule({
 }: ShareExportModuleProps) {
   const [copied, setCopied] = React.useState(false);
   const [showDossierModal, setShowDossierModal] = React.useState(false);
+  const [generatingPdf, setGeneratingPdf] = React.useState(false);
+  const dossierRef = React.useRef<HTMLDivElement>(null);
 
   const triggerActionWithAd = (actionName: string, originalAction: () => void) => {
     if (onTriggerInterstitial) {
@@ -39,14 +41,14 @@ export default function ShareExportModule({
 
   if (!selectedPet) return null;
 
-  const petVaccines = vaccines.filter((v) => v.petId === selectedPet.id);
+  const petVaccines = vaccines.filter((v) => String(v.petId) === String(selectedPet.id));
   const petMeas = measurements
-    .filter((m) => m.petId === selectedPet.id)
+    .filter((m) => String(m.petId) === String(selectedPet.id))
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-  const petLogs = logs.filter((l) => l.petId === selectedPet.id);
-  const petMedications = medications.filter((m) => m.petId === selectedPet.id);
-  const petReproCycles = reproCycles.filter((c) => c.petId === selectedPet.id);
-  const petRoutines = routines.filter((r) => r.petId === selectedPet.id);
+  const petLogs = logs.filter((l) => String(l.petId) === String(selectedPet.id));
+  const petMedications = medications.filter((m) => String(m.petId) === String(selectedPet.id));
+  const petReproCycles = reproCycles.filter((c) => String(c.petId) === String(selectedPet.id));
+  const petRoutines = routines.filter((r) => String(r.petId) === String(selectedPet.id));
 
   // Helper to calculate age with extreme precision
   const calculateAgeRange = (birthDateStr?: string) => {
@@ -78,31 +80,96 @@ export default function ShareExportModule({
 
     let text = `🐾 *Histórico de Saúde do Pet: ${selectedPet.name}* 🐾\n`;
     text += `• Espécie/Raça: ${selectedPet.species === 'dog' ? '🐶 Cão' : selectedPet.species === 'cat' ? '🐱 Gato' : '🐾 Outro'} (${selectedPet.breed || 'SRD'})\n`;
+    text += `• Gênero: ${selectedPet.gender === 'female' ? 'Fêmea (♀️)' : 'Macho (♂️)'}\n`;
     text += `• Nascimento: ${selectedPet.birthDate ? new Date(selectedPet.birthDate).toLocaleDateString('pt-BR', { timeZone: 'UTC' }) : 'Não informado'}\n`;
+    text += `• Idade: ${calculateAgeRange(selectedPet.birthDate)}\n`;
     if (selectedPet.microchip) text += `• Microchip ID: ${selectedPet.microchip}\n`;
     if (selectedPet.rga) text += `• RGA: ${selectedPet.rga}\n`;
-    if (latestWeight) text += `• Peso Atual: ${latestWeight.toFixed(2)} kg\n\n`;
+    if (selectedPet.adoptionDate) text += `• Data de Adoção: ${new Date(selectedPet.adoptionDate).toLocaleDateString('pt-BR', { timeZone: 'UTC' })}\n`;
+    if (latestWeight) text += `• Peso Atual: ${latestWeight.toFixed(2)} kg\n`;
+    text += `• Tutor Responsável: ${tutorName}\n\n`;
 
-    text += `*💉 VACINAS APLICADAS:* ${appliedVaccines.length > 0 ? '' : 'Nenhuma'}\n`;
-    appliedVaccines.forEach((v) => {
-      text += `- ${v.name} (${v.appliedDate ? new Date(v.appliedDate).toLocaleDateString('pt-BR', { timeZone: 'UTC' }) : '—'})\n`;
-    });
-
-    if (pendingVaccines.length > 0) {
-      text += `\n*⌛ PRÓXIMAS DOSES / REFORÇO:*\n`;
-      pendingVaccines.forEach((v) => {
-        text += `- ${v.name} (Reforço em: ${new Date(v.boosterDate).toLocaleDateString('pt-BR', { timeZone: 'UTC' })})\n`;
-      });
+    // 1. CARTEIRA DE VACINAÇÃO
+    if (petVaccines.length > 0) {
+      text += `*💉 CARTEIRA DE VACINAS:*\n`;
+      if (appliedVaccines.length > 0) {
+        text += `*Aplicadas:* \n`;
+        appliedVaccines.forEach((v) => {
+          const dateStr = v.appliedDate ? new Date(v.appliedDate).toLocaleDateString('pt-BR', { timeZone: 'UTC' }) : '—';
+          text += `- ${v.name} (${dateStr})${v.batch ? ` [Lote: ${v.batch}]` : ''}${v.veterinarian ? ` - Aplicador: ${v.veterinarian}` : ''}\n`;
+        });
+      }
+      if (pendingVaccines.length > 0) {
+        text += `*Próximas Doses / Reforços:* \n`;
+        pendingVaccines.forEach((v) => {
+          const dateStr = new Date(v.boosterDate).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+          text += `- ${v.name} (Reforço em: ${dateStr})${v.notes ? ` - Obs: ${v.notes}` : ''}\n`;
+        });
+      }
+      text += `\n`;
     }
 
+    // 2. PESO E BIOMETRIA
+    if (petMeas.length > 0) {
+      text += `*📈 HISTÓRICO BIOMÉTRICO (PESO):*\n`;
+      petMeas.forEach((m) => {
+        const dateStr = new Date(m.date).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+        text += `- ${dateStr}: ${m.weight.toFixed(2)} kg${m.height ? ` (${m.height} cm)` : ''}${m.notes ? ` - ${m.notes}` : ''}\n`;
+      });
+      text += `\n`;
+    }
+
+    // 3. MEDICAMENTOS / TRATAMENTOS
+    if (petMedications.length > 0) {
+      text += `*💊 TRATAMENTOS E MEDICAMENTOS:*\n`;
+      petMedications.forEach((m) => {
+        const completed = m.doses && m.doses.length > 0 && m.doses.every((d) => d.taken);
+        const statusLabel = completed ? 'Fim Ciclo ✅' : 'Ativo ⏳';
+        text += `- ${m.name} [${statusLabel}]: ${m.dosage} - a cada ${m.frequencyHours}h por ${m.durationDays} dias${m.notes ? ` (Obs: ${m.notes})` : ''}\n`;
+      });
+      text += `\n`;
+    }
+
+    // 4. CICLO REPRODUTIVO
+    if (selectedPet.gender === 'female' && petReproCycles.length > 0) {
+      text += `*❤️ CICLO REPRODUTIVO E CIOS:*\n`;
+      petReproCycles.forEach((c) => {
+        const dateStr = new Date(c.date).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+        let evLabel = c.event === 'cio' ? 'Início do Cio (Estro)' : c.event === 'cross' ? 'Acasalamento Coito' : 'Inseminação Assistida';
+        text += `- ${dateStr}: ${evLabel}${c.notes ? ` - Obs: ${c.notes}` : ''}\n`;
+      });
+      text += `\n`;
+    }
+
+    // 5. MANEJO E HIGIENE (ROUTINES)
+    if (petRoutines.length > 0) {
+      text += `*🧼 ROTINAS E HIGIENE DE MANEJO:*\n`;
+      petRoutines.forEach((r) => {
+        const lastDoneDate = new Date(r.lastDone);
+        const nextDueDate = new Date(lastDoneDate.getTime() + r.frequencyDays * 24 * 60 * 60 * 1000);
+        const isOverdue = nextDueDate.getTime() < Date.now();
+        const statusLabel = isOverdue ? 'Atrasada ⚠️' : 'Em Dia ✅';
+        text += `- ${r.title} [${statusLabel}]: freq. a cada ${r.frequencyDays} dias. Última: ${lastDoneDate.toLocaleDateString('pt-BR', { timeZone: 'UTC' })} | Próxima: ${nextDueDate.toLocaleDateString('pt-BR', { timeZone: 'UTC' })}${r.notes ? ` - ${r.notes}` : ''}\n`;
+      });
+      text += `\n`;
+    }
+
+    // 6. HISTÓRICO CLÍNICO E EXAMES
     if (petLogs.length > 0) {
-      text += `\n*🩺 HISTÓRICO CLÍNICO RECENTE:*\n`;
-      petLogs.slice(0, 3).forEach((l) => {
-        text += `- [${l.type.toUpperCase()}] ${l.title} (${new Date(l.date).toLocaleDateString('pt-BR', { timeZone: 'UTC' })})\n`;
+      text += `*🩺 HISTÓRICO CLÍNICO, EXAMES E CIRURGIAS:*\n`;
+      petLogs.forEach((l) => {
+        const dateStr = new Date(l.date).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+        let typeLabel = l.type === 'consultation' ? 'Consulta' : l.type === 'surgery' ? 'Cirurgia' : l.type === 'hospitalization' ? 'Internação' : l.type === 'allergy' ? 'Alergia' : 'Comportamento';
+        text += `• ${dateStr} - [${typeLabel}] *${l.title}*\n`;
+        text += `  Descrição: ${l.notes}\n`;
+        if (l.diagnostics) {
+          text += `  Diagnóstico: *${l.diagnostics}*\n`;
+        }
       });
+      text += `\n`;
     }
 
-    text += `\n_Enviado de forma autônoma via app Ctrl+Pet — Carteira Digital Livre._`;
+    text += `_Enviado de forma autônoma via app Ctrl+Pet — Carteira Digital Livre._`;
     return encodeURIComponent(text);
   };
 
@@ -114,23 +181,141 @@ export default function ShareExportModule({
   };
 
   const handlePrint = () => {
+    // Detect if we are running inside a sandboxed iframe (like the AI Studio lateral preview)
+    const isIframe = window.self !== window.top;
+    
+    if (isIframe) {
+      alert(
+        "💡 Dica de Impressão no Visualizador Lateral:\n\n" +
+        "Por regras de segurança dos navegadores, a janela de impressão direta do sistema é bloqueada dentro de painéis integrados (iframes).\n\n" +
+        "Para imprimir este prontuário sem problemas, você tem duas soluções fáceis:\n\n" +
+        "1️⃣ Use o botão verde 'Salvar em PDF (.pdf)' que gera e baixa o prontuário completo de forma 100% autônoma!\n\n" +
+        "2️⃣ Clique em 'Abrir no Navegador 🚀' no topo da tela para abrir o aplicativo em tela cheia numa nova aba, onde o botão de 'Imprimir do Sistema' funcionará perfeitamente!"
+      );
+      return;
+    }
+
     try {
       window.print();
     } catch (e) {
       console.warn('Silent print bypass in sandboxed window context:', e);
+      alert(
+        "⚠️ O seu navegador impediu a abertura do diálogo de impressão.\n\n" +
+        "Por favor, use o botão verde 'Salvar em PDF (.pdf)' para baixar o prontuário direto, ou abra o aplicativo em uma nova aba do navegador para imprimir."
+      );
+    }
+  };
+
+  const handleDownloadPDF = async () => {
+    if (!dossierRef.current) return;
+    try {
+      setGeneratingPdf(true);
+      
+      const element = dossierRef.current;
+      const scrollContainer = element.parentElement;
+      const originalScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+      
+      // Rola o container para o topo antes de renderizar para evitar cortes de scroll
+      if (scrollContainer) {
+        scrollContainer.scrollTop = 0;
+      }
+      
+      // Carrega html2canvas de forma dinâmica e assíncrona usando html2canvas-pro para suportar oklch()
+      const html2canvasModule = await import('html2canvas-pro');
+      const html2canvas = html2canvasModule.default;
+      
+      const canvas = await html2canvas(element, {
+        scale: 2, // DPI duplo para texto nítido no PDF de impressão
+        useCORS: true,
+        logging: false,
+        backgroundColor: '#ffffff',
+        scrollY: 0,
+        scrollX: 0,
+        onclone: (clonedDoc) => {
+          const el = clonedDoc.getElementById('dossier-pdf-content');
+          if (el) {
+            // Remove quaisquer travas ou limites de scroll no elemento capturado
+            el.style.height = 'auto';
+            el.style.maxHeight = 'none';
+            el.style.overflow = 'visible';
+            
+            // Corrige recursivamente os estilos de todos os pais no documento clonado
+            let parent = el.parentElement;
+            while (parent && parent !== clonedDoc.body) {
+              parent.style.height = 'auto';
+              parent.style.maxHeight = 'none';
+              parent.style.overflow = 'visible';
+              parent.style.display = 'block'; // Garante que layouts flex ou grids não colapsem a altura no clone
+              parent.style.padding = '0';
+              parent.style.margin = '0';
+              parent = parent.parentElement;
+            }
+            
+            // Garante que o body e o html do clone expandam livremente
+            clonedDoc.body.style.height = 'auto';
+            clonedDoc.body.style.maxHeight = 'none';
+            clonedDoc.body.style.overflow = 'visible';
+            if (clonedDoc.documentElement) {
+              clonedDoc.documentElement.style.height = 'auto';
+              clonedDoc.documentElement.style.maxHeight = 'none';
+              clonedDoc.documentElement.style.overflow = 'visible';
+            }
+          }
+        }
+      });
+      
+      // Restaura a posição original do scroll do usuário
+      if (scrollContainer) {
+        scrollContainer.scrollTop = originalScrollTop;
+      }
+      
+      const imgData = canvas.toDataURL('image/jpeg', 0.95);
+      
+      // Carrega jsPDF de forma dinâmica
+      const { jsPDF } = await import('jspdf');
+      const pdf = new jsPDF({
+        orientation: 'p',
+        unit: 'mm',
+        format: 'a4',
+      });
+      
+      const pdfWidth = pdf.internal.pageSize.getWidth(); // 210mm
+      const pdfHeight = pdf.internal.pageSize.getHeight(); // 297mm
+      
+      const canvasWidth = canvas.width;
+      const canvasHeight = canvas.height;
+      
+      // Calcula a altura da imagem proporcionalmente ao A4
+      const imgHeightMm = (canvasHeight * pdfWidth) / canvasWidth;
+      
+      let heightLeft = imgHeightMm;
+      let position = 0;
+      
+      // Renderiza a primeira página
+      pdf.addImage(imgData, 'JPEG', 0, position, pdfWidth, imgHeightMm);
+      heightLeft -= pdfHeight;
+      
+      // Cria páginas subsequentes caso o documento exceda uma página A4
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeightMm;
+        pdf.addPage();
+        pdf.addImage(imgData, 'JPEG', 0, position, pdfWidth, imgHeightMm);
+        heightLeft -= pdfHeight;
+      }
+      
+      const filename = `prontuario-${selectedPet?.name?.toLowerCase().replace(/\s+/g, '-') || 'pet'}.pdf`;
+      pdf.save(filename);
+      
+    } catch (error) {
+      console.error('Erro ao gerar PDF:', error);
+      alert('Houve um erro técnico ao gerar o PDF. Se o problema persistir, clique em "Imprimir do Sistema" ou abra em uma aba externa fora do editor.');
+    } finally {
+      setGeneratingPdf(false);
     }
   };
 
   const handleOpenPreview = () => {
     setShowDossierModal(true);
-    // Fires standard print call, catching sandbox blocks inside DevTools frames
-    setTimeout(() => {
-      try {
-        window.print();
-      } catch (e) {
-        console.warn('Local print bypass:', e);
-      }
-    }, 450);
   };
 
   // Shared pure document layouter to support identical rendering for A4 print stylesheet and on-screen modal preview
@@ -744,12 +929,29 @@ export default function ShareExportModule({
                   <p className="text-[11px] text-slate-400 font-medium">Visualização prévia e geração do laudo de impressão A4</p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={handleDownloadPDF}
+                  disabled={generatingPdf}
+                  className={`px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow-md cursor-pointer ${generatingPdf ? 'animate-pulse' : ''}`}
+                >
+                  {generatingPdf ? (
+                    <>
+                      <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                      Gerando PDF...
+                    </>
+                  ) : (
+                    <>
+                      <FileText className="w-4 h-4" /> Salvar em PDF (.pdf)
+                    </>
+                  )}
+                </button>
                 <button
                   onClick={handlePrint}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow-md cursor-pointer"
+                  disabled={generatingPdf}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow-md cursor-pointer"
                 >
-                  <Printer className="w-4 h-4" /> Imprimir / Salvar PDF
+                  <Printer className="w-4 h-4" /> Imprimir do Sistema
                 </button>
                 <button
                   onClick={() => setShowDossierModal(false)}
@@ -764,10 +966,10 @@ export default function ShareExportModule({
             {/* Sandbox Iframe Protection Advice with Active Anchor Link */}
             <div className="px-6 py-4 bg-indigo-50 dark:bg-indigo-950/20 border-b border-indigo-100 dark:border-indigo-900/50 text-indigo-900 dark:text-indigo-200 text-xs flex flex-col md:flex-row md:items-center justify-between gap-4 leading-relaxed">
               <div className="flex gap-2 items-start">
-                <span className="text-sm mt-0.5">⚠️</span>
+                <span className="text-sm mt-0.5">💡</span>
                 <div>
-                  <strong className="font-extrabold text-indigo-950 dark:text-indigo-100 block mb-0.5">Aviso de Segurança (Iframe do Editor)</strong>
-                  Como estamos dentro do ambiente seguro de pré-visualização, o navegador pode travar popups e impedir a tela de PDF. Para salvar sem qualquer bloqueio, abra o aplicativo em uma aba externa e imprima:
+                  <strong className="font-extrabold text-indigo-950 dark:text-indigo-100 block mb-0.5">Dica para Celular / Aplicativo Híbrido</strong>
+                  Se você estiver usando o aplicativo no celular ou no simulador, utilize o botão <span className="font-bold">"Salvar em PDF (.pdf)"</span> acima. Ele gera e baixa o documento de forma 100% autônoma e compatível!
                 </div>
               </div>
               <a
@@ -782,7 +984,11 @@ export default function ShareExportModule({
 
             {/* Scrollable document layout area styled representing an A4 printed sheet of paper */}
             <div className="flex-1 overflow-y-auto p-6 md:p-10 bg-slate-100 dark:bg-slate-950/60 flex justify-center">
-              <div className="bg-white text-slate-900 p-8 md:p-12 shadow-xl max-w-[850px] w-full rounded-2xl border border-slate-200 dark:border-slate-800 text-left">
+              <div 
+                ref={dossierRef}
+                id="dossier-pdf-content"
+                className="bg-white text-slate-900 p-8 md:p-12 shadow-xl max-w-[850px] w-full rounded-2xl border border-slate-200 dark:border-slate-800 text-left"
+              >
                 {renderDossierContent()}
               </div>
             </div>
