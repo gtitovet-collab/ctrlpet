@@ -228,40 +228,59 @@ export default function ShareExportModule({
       const html2canvas = html2canvasModule.default;
       
       const canvas = await html2canvas(element, {
-        scale: 2, // DPI duplo para texto nítido no PDF de impressão
+        scale: 2.5, // DPI aprimorado para textos e linhas extremamente nítidas na impressão/PDF
         useCORS: true,
         logging: false,
         backgroundColor: '#ffffff',
         scrollY: 0,
         scrollX: 0,
+        windowWidth: 850, // Força o contexto de renderização responsiva a se comportar como desktop (evita colapsos de colunas!)
         onclone: (clonedDoc) => {
-          const el = clonedDoc.getElementById('dossier-pdf-content');
-          if (el) {
-            // Remove quaisquer travas ou limites de scroll no elemento capturado
-            el.style.height = 'auto';
-            el.style.maxHeight = 'none';
-            el.style.overflow = 'visible';
-            
-            // Corrige recursivamente os estilos de todos os pais no documento clonado
-            let parent = el.parentElement;
-            while (parent && parent !== clonedDoc.body) {
-              parent.style.height = 'auto';
-              parent.style.maxHeight = 'none';
-              parent.style.overflow = 'visible';
-              parent.style.display = 'block'; // Garante que layouts flex ou grids não colapsem a altura no clone
-              parent.style.padding = '0';
-              parent.style.margin = '0';
-              parent = parent.parentElement;
-            }
-            
-            // Garante que o body e o html do clone expandam livremente
+          // Garante que o modo escuro do app esteja desativado no clone para a impressão ser sempre preto no branco de alto contraste
+          if (clonedDoc.documentElement) {
+            clonedDoc.documentElement.classList.remove('dark');
+            clonedDoc.documentElement.style.width = '850px';
+            clonedDoc.documentElement.style.height = 'auto';
+            clonedDoc.documentElement.style.maxHeight = 'none';
+            clonedDoc.documentElement.style.overflow = 'visible';
+          }
+          if (clonedDoc.body) {
+            clonedDoc.body.classList.remove('dark');
+            clonedDoc.body.style.width = '850px';
             clonedDoc.body.style.height = 'auto';
             clonedDoc.body.style.maxHeight = 'none';
             clonedDoc.body.style.overflow = 'visible';
-            if (clonedDoc.documentElement) {
-              clonedDoc.documentElement.style.height = 'auto';
-              clonedDoc.documentElement.style.maxHeight = 'none';
-              clonedDoc.documentElement.style.overflow = 'visible';
+            clonedDoc.body.style.backgroundColor = '#ffffff';
+          }
+
+          const el = clonedDoc.getElementById('dossier-pdf-content');
+          if (el) {
+            // Força as dimensões perfeitas de folha A4 no elemento clonado
+            el.style.width = '800px';
+            el.style.minWidth = '800px';
+            el.style.maxWidth = '800px';
+            el.style.padding = '32px';
+            el.style.margin = '0 auto';
+            el.style.height = 'auto';
+            el.style.maxHeight = 'none';
+            el.style.overflow = 'visible';
+            el.style.boxShadow = 'none'; // Sem sombras artificiais no documento final
+            el.style.borderRadius = '0'; // Bordas retas corporativas para o prontuário impresso
+            el.style.backgroundColor = '#ffffff';
+            el.style.color = '#0f172a'; // text-slate-900 equivalente
+            
+            // Corrige recursivamente os estilos de todos os pais no documento clonado para largura e visibilidade livre
+            let parent = el.parentElement;
+            while (parent && parent !== clonedDoc.body) {
+              parent.style.width = 'auto';
+              parent.style.minWidth = 'auto';
+              parent.style.height = 'auto';
+              parent.style.maxHeight = 'none';
+              parent.style.overflow = 'visible';
+              parent.style.display = 'block'; // Garante que layouts flex ou grids dos pais não afetem a largura
+              parent.style.padding = '0';
+              parent.style.margin = '0';
+              parent = parent.parentElement;
             }
           }
         }
