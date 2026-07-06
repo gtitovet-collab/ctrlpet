@@ -2,6 +2,9 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import { Pet, Vaccine, Measurement, ClinicalLog, MedicationSchedule, ReproCycle, RoutineActivity } from '../types';
 import { Share2, FileText, Printer, Check, Copy, X, ExternalLink } from 'lucide-react';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+import { Capacitor } from '@capacitor/core';
 
 interface ShareExportModuleProps {
   selectedPet: Pet | null;
@@ -304,7 +307,34 @@ export default function ShareExportModule({
       }
       
       const filename = `prontuario-${selectedPet?.name?.toLowerCase().replace(/\s+/g, '-') || 'pet'}.pdf`;
-      pdf.save(filename);
+      
+      if (Capacitor.isNativePlatform()) {
+        let dataUri = '';
+        try {
+          dataUri = pdf.output('datauristring');
+        } catch (err) {
+          dataUri = pdf.output('dataurlstring');
+        }
+        
+        const base64Data = dataUri.substring(dataUri.indexOf(',') + 1);
+        
+        // Escreve o arquivo temporário no cache do aparelho para que possa ser lido externamente
+        const result = await Filesystem.writeFile({
+          path: filename,
+          data: base64Data,
+          directory: Directory.Cache,
+        });
+
+        // Abre o diálogo nativo do sistema para compartilhar (via WhatsApp, email, imprimir ou salvar nos arquivos)
+        await Share.share({
+          title: `Prontuário de ${selectedPet?.name || 'Pet'}`,
+          text: `Confira o prontuário completo de ${selectedPet?.name || 'Pet'}`,
+          url: result.uri,
+          dialogTitle: 'Compartilhar ou Imprimir Prontuário',
+        });
+      } else {
+        pdf.save(filename);
+      }
       
     } catch (error) {
       console.error('Erro ao gerar PDF:', error);
