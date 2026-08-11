@@ -1,0 +1,6 @@
+{
+  "name": "Ctrl+Pet",
+  "description": "Carteira de vacinação e monitoramento de saúde para pets, 100% autônoma e offline-first.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
